@@ -1,134 +1,166 @@
 import streamlit as st
+import json
 from langchain.document_loaders import UnstructuredFileLoader
-from langchain.text_splitter import CharacterTextSplitter
-from langchain.vectorstores import FAISS
-from langchain.embeddings import OpenAIEmbeddings, CacheBackedEmbeddings
-from langchain.storage import LocalFileStore
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
 from langchain.chat_models import ChatOpenAI
-from langchain.memory import ConversationBufferMemory
-from langchain.callbacks.base import BaseCallbackHandler
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.retrievers import WikipediaRetriever
+from langchain.prompts import PromptTemplate
+from langchain.callbacks import StreamingStdOutCallbackHandler
 from pathlib import Path
 
 st.set_page_config(
-    page_title="DocumentGPT",
-    page_icon = "📃"
+    page_title="QuizGPT",
+    page_icon = "❓"
 )
 
-class ChatCallbackHandler(BaseCallbackHandler):
-    message = ""
+st.title("QuizGPT")
 
-    def on_llm_start(self, *args, **kwargs):
-        self.message_box = st.empty()
+function = {
+    "name": "create_quiz",
+    "description": "function that takes a list of questions and answers and returns a quiz",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                        },
+                        "answers": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "answer": {
+                                        "type": "string",
+                                    },
+                                    "correct": {
+                                        "type": "boolean",
+                                    },
+                                },
+                                "required": ["answer", "correct"],
+                            },
+                        },
+                    },
+                    "required": ["question", "answers"],
+                },
+            }
+        },
+        "required": ["questions"],
+    },
+}
 
-    def on_llm_end(self, *args, **kwargs):
-        save_message(self.message, "ai")
-
-    def on_llm_new_token(self, token, *args, **kwargs):
-        self.message += token
-        self.message_box.markdown(self.message)
-
-@st.cache_data(show_spinner = "Embedding file...")
-def embed_file(file):
+@st.cache_data(show_spinner = "Loading file...")
+def split_file(file):
     file_content = file.read()
     file_path = f"./.cache/files/{file.name}"
     Path("./.cache/files").mkdir(parents=True, exist_ok=True)
     with open(file_path, "wb+") as f:
         f.write(file_content)
-    cache_dir = LocalFileStore(f"./.cache/embeddings/{file.name}")
     splitter =CharacterTextSplitter.from_tiktoken_encoder(
         separator="\n",
         chunk_size= 600,
         chunk_overlap= 100,
     )
     loader = UnstructuredFileLoader(file_path)
-    docs = loader.load_and_split(text_splitter= splitter)
-    embeddings = OpenAIEmbeddings(api_key = api_key)
-    cached_embeddings = CacheBackedEmbeddings.from_bytes_store(
-        embeddings, cache_dir
-    )
-    vectorstore = FAISS.from_documents(docs, cached_embeddings)
-    retriever = vectorstore.as_retriever()
-    return retriever
+    docs = loader.load_and_split(text_splitter = splitter)
+    return docs
 
-def save_message(message, role):
-    st.session_state["messages"].append({"message":message, "role": role})
-
-def send_message(message, role, save=True):
-    with st.chat_message(role):
-        st.markdown(message)
-    if save:
-        save_message(message,role)
-
-def paint_history():
-    for message in st.session_state["messages"]:
-        send_message(message["message"],message["role"],save=False)
+@st.cache_data(show_spinner = "Searching Wikipedia...")
+def wiki_search(topic):
+    retriever = WikipediaRetriever(top_k_results= 2)
+    docs = retriever.get_relevant_documents(topic)
+    return docs
 
 def format_docs(docs):
     return "\n\n".join(document.page_content for document in docs)
 
-def load_memory(input):
-    return memory.load_memory_variables({})["history"]
+prompt = PromptTemplate.from_template("""
+    You are a helpful assistant that is role playing as a teacher.
+                    
+    Based ONLY on the following context make 5 questions to test the user's knowledge about the text.
+    
+    Each question should have 3 answers, two of them must be incorrect and one should be correct.
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system","""
-    Answer the question using ONLY the following context. If you don't know the answer just say you don't know. DON'T make anything up.
+    You can control quiz's Difficulty.
+    Each Difficulty have 3 things: EASY, MEDIUM, HARD.
+    The Difficulty of Quiz is {level}.
 
     Context: {context}
-    """),
-    ("human","{question}"),
-])
-
-def main():
-    if not api_key:
-        st.error("API Key를 입력하지 않았습니다.")
-        return
-    
-    llm = ChatOpenAI(
-        temperature=0.1, 
-        streaming= True,
-        api_key = api_key,
-        callbacks=[
-            ChatCallbackHandler(),
-        ]
-    )
-
-    if file:
-        retriever = embed_file(file)
-        send_message("I'm ready! Ask away!", "ai",save=False)
-        paint_history()
-        message = st.chat_input("Ask anything about your file...")
-        if message:
-            send_message(message, "human")
-            chain = {
-                "context": retriever | RunnableLambda(format_docs),
-                "question": RunnablePassthrough(),
-            } | prompt | llm
-            with st.chat_message("ai"):
-                result = chain.invoke(message)
-    else:
-        st.session_state["messages"]= []
-        return
-
-
-st.title("DocumentGPT")
-
-st.markdown("""
-Welcome!
-
-Use this chatbot to ask questions to an AI about your files!
-
-Upload your API Key and files on the sidebar.
 """)
 
-with st.sidebar:
-    st.title("Input Line")
-    api_key = st.text_input("Put your API key", type="password")
-    file = st.file_uploader("Upload a .txt, .pdf or .docx file", type=["pdf","txt","docx"],)
+@st.cache_data(show_spinner= "Making Quiz...")
+def run_quiz_chain(_docs, level):
+    chain = prompt | llm
+    response = chain.invoke({"context": format_docs(_docs), "level": level})
+    r = response.additional_kwargs["function_call"]["arguments"]
+    return json.loads(r)
 
-try:
-    main()
-except Exception as e:
-    st.error("Check your OpenAI API Key or File")
-    st.write(e)
+
+with st.sidebar:
+    docs=None
+    st.title("Input Line")
+
+    api_key = st.text_input("Put your API key", type="password")
+
+    choice = st.selectbox("Choose what you want to use.", (
+        "File","Wikipedia Article",
+    ),)
+    if choice=="File":
+        file = st.file_uploader("Upload a .txt, .pdf or .docx file", type=["pdf","txt","docx"],)
+        if file:
+            docs = split_file(file)
+    else :
+        topic = st.text_input("Search Wikipedia...")
+        if topic:
+            docs = wiki_search(topic)
+    
+    level = st.selectbox("Choose the Level of Quiz.",(
+        "EASY","MEDIUM","HARD",
+    ))
+
+if not docs:
+    st.markdown("""
+    Welcome to QuizGPT.
+
+    I will make a quiz from Wikipedia articles or files you upload to test your knowledge and help you study.
+
+    Get started by uploading a file or searching on Wikipedia in the sidebar.
+    """)
+
+else:
+    if api_key:
+        llm = ChatOpenAI(
+            temperature = 1,
+            model="gpt-5-nano-2025-08-07",
+            streaming=True,
+            callbacks=[StreamingStdOutCallbackHandler()],
+            api_key=api_key,
+        ).bind(
+            function_call={"name": "create_quiz"},
+            functions=[function],
+        )
+        response = run_quiz_chain(docs, level)
+        question_count = len(response["questions"])
+        success_count = 0
+        with st.form("quiz_form"):
+            
+            for question in response["questions"]:
+                st.write(question["question"])
+                value = st.radio("Select an option", [
+                    answer["answer"] for answer in question["answers"]
+                    ],index=None)
+                if {"answer": value, "correct": True} in question["answers"]:
+                    st.success("Correct!")
+                    success_count+=1
+                elif value is not None:
+                    st.error("Wrong")
+            button = st.form_submit_button()
+            st.write(f"Quiz result: {success_count} / {question_count}")
+        if(question_count == success_count):
+            st.balloons()
+    else:
+        st.error("You have to put your API key first!")
