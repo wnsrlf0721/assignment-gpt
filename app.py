@@ -123,7 +123,8 @@ def load_website(url):
     loader.requests_per_second = 5
     
     docs = loader.load_and_split(text_splitter = splitter)
-    vector_store = FAISS.from_documents(docs, OpenAIEmbeddings(api_key = api_key,))
+    embeddings = OpenAIEmbeddings(openai_api_key = api_key)
+    vector_store = FAISS.from_documents(docs, embeddings)
     return vector_store.as_retriever()
 
 def save_message(message, role):
@@ -161,8 +162,6 @@ with st.sidebar:
     st.markdown("----")
     st.write("Github: https://github.com/wnsrlf0721/assignment-gpt")
 
-retriever = load_website(url)
-
 if not api_key:
     st.error("Please input your OpenAI API Key on the sidebar, then you ask questions")
     st.session_state["messages"]=[]
@@ -170,11 +169,12 @@ else:
     llm = ChatOpenAI(
         temperature=0.1,
         streaming= True,
-        api_key = api_key,
+        openai_api_key= api_key,
         callbacks=[
             ChatCallbackHandler(),
         ]
     )
+    retriever = load_website(url)
     chain = {
         "docs": retriever, 
         "question": RunnablePassthrough(),
