@@ -123,7 +123,7 @@ def load_website(url):
     loader.requests_per_second = 5
     
     docs = loader.load_and_split(text_splitter = splitter)
-    vector_store = FAISS.from_documents(docs, OpenAIEmbeddings())
+    vector_store = FAISS.from_documents(docs, OpenAIEmbeddings(api_key = api_key,))
     return vector_store.as_retriever()
 
 def save_message(message, role):
